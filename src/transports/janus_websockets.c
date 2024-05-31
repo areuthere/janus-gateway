@@ -929,6 +929,13 @@ int janus_websockets_send_message(janus_transport_session *transport, void *requ
 		janus_mutex_unlock(&transport->mutex);
 		return -1;
 	}
+
+	char msg_text_str[4096];
+	char* msg_text = json_dumps(message, JSON_INDENT(3) | JSON_PRESERVE_ORDER);
+	snprintf(msg_text_str, sizeof(msg_text_str), "%s", msg_text);
+    JANUS_LOG(LOG_INFO, "Send response to client via Janus on transport... Adding response to queue:\n%s\n",msg_text_str);
+	free(msg_text);
+
 	/* Convert to string and enqueue */
 	char *payload = json_dumps(message, json_format);
 	if(payload == NULL) {

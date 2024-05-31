@@ -54,6 +54,8 @@ typedef struct janus_options {
 	const char *apisecret;
 	gboolean token_auth;
 	const char *token_auth_secret;
+	gboolean workapps_token_auth;
+	const char *workapps_token_auth_secret;
 	gboolean event_handlers;
 	gboolean no_webrtc_encryption;
 	gboolean print_version;

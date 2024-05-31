@@ -110,6 +110,8 @@ janus_SOURCES = \
 	ip-utils.h \
 	turnrest.c \
 	turnrest.h \
+	workapps_authentication.c \
+	workapps_authentication.h \
 	utils.c \
 	utils.h \
 	version.c \

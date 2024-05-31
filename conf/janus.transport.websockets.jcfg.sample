@@ -1,8 +1,8 @@
 # WebSockets stuff: whether they should be enabled, which ports they
 # should use, and so on.
 general: {
-	#events = true					# Whether to notify event handlers about transport events (default=true)
-	json = "indented"				# Whether the JSON messages should be indented (default),
+	events = true					# Whether to notify event handlers about transport events (default=true)
+	json = "compact"				# Whether the JSON messages should be indented (default),
 									# plain (no indentation) or compact (no indentation and no spaces)
 	#pingpong_trigger = 30			# After how many seconds of idle, a PING should be sent
 	#pingpong_timeout = 10			# After how many seconds of not getting a PONG, a timeout should be detected

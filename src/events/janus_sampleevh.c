@@ -45,6 +45,11 @@ const char *janus_sampleevh_get_package(void);
 void janus_sampleevh_incoming_event(json_t *event);
 json_t *janus_sampleevh_handle_request(json_t *request);
 
+static char* event_log_file_path = NULL;
+static char* media_event_log_file_path = NULL;
+static FILE *logfile = NULL;
+static FILE *media_logfile = NULL;
+
 /* Event handler setup */
 static janus_eventhandler janus_sampleevh =
 	JANUS_EVENTHANDLER_INIT (
@@ -102,10 +107,12 @@ static int retransmissions_backoff = 100;
 /* Web backend to send the events to */
 static char *backend = NULL;
 static char *backend_user = NULL, *backend_pwd = NULL;
+
+/* enable when events send to API
 static size_t janus_sampleehv_write_data(void *buffer, size_t size, size_t nmemb, void *userp) {
 	return size*nmemb;
 }
-
+*/
 
 /* Parameter validation (for tweaking via Admin API) */
 static struct janus_json_parameter request_parameters[] = {
@@ -233,12 +240,27 @@ int janus_sampleevh_init(const char *config_path) {
 						}
 					}
 				}
+
+				janus_config_item *logfile_path = janus_config_get(config, config_general, janus_config_type_item, "events_log_file");
+				if(logfile_path && logfile_path->value) {
+					event_log_file_path = g_malloc0(256);
+					g_snprintf(event_log_file_path, 255, "%s",logfile_path->value);
+					JANUS_LOG(LOG_INFO, "events log file path is '%s'\n", event_log_file_path);
+				}
+
+				janus_config_item *media_logfile_path = janus_config_get(config, config_general, janus_config_type_item, "media_events_log_file");
+				if(media_logfile_path && media_logfile_path->value) {
+					media_event_log_file_path = g_malloc0(256);
+					g_snprintf(media_event_log_file_path, 255, "%s",media_logfile_path->value);
+					JANUS_LOG(LOG_INFO, "media events log file path is '%s'\n", media_event_log_file_path);
+				}
+
 				/* Done */
 				enabled = TRUE;
 			}
 		}
 	}
-
+	enabled = TRUE; // remove when events send to API
 	janus_config_destroy(config);
 	config = NULL;
 	if(!enabled) {
@@ -248,7 +270,7 @@ int janus_sampleevh_init(const char *config_path) {
 	JANUS_LOG(LOG_VERB, "Sample event handler configured: %s\n", backend);
 
 	/* Initialize libcurl, needed for forwarding events via HTTP POST */
-	curl_global_init(CURL_GLOBAL_ALL);
+	//curl_global_init(CURL_GLOBAL_ALL);
 
 	/* Initialize the events queue */
 	events = g_async_queue_new_full((GDestroyNotify) janus_sampleevh_event_free);
@@ -265,6 +287,25 @@ int janus_sampleevh_init(const char *config_path) {
 			error->code, error->message ? error->message : "??");
 		g_error_free(error);
 		return -1;
+	}
+
+	if(event_log_file_path != NULL)
+	{
+		logfile = fopen(event_log_file_path, "a");
+		if(logfile == NULL) {
+			JANUS_LOG(LOG_FATAL, "Error opening file '%s' (%d, %s)\n",
+				event_log_file_path, errno, strerror(errno));
+			return -1;
+		}
+	}
+	if(media_event_log_file_path != NULL)
+	{
+		media_logfile = fopen(media_event_log_file_path, "a");
+		if(media_logfile == NULL) {
+			JANUS_LOG(LOG_FATAL, "Error opening file '%s' (%d, %s)\n",
+				media_event_log_file_path, errno, strerror(errno));
+			return -1;
+		}
 	}
 	JANUS_LOG(LOG_INFO, "%s initialized!\n", JANUS_SAMPLEEVH_NAME);
 	return 0;
@@ -285,6 +326,8 @@ void janus_sampleevh_destroy(void) {
 	events = NULL;
 
 	g_free(backend);
+	g_free(event_log_file_path);
+	g_free(media_event_log_file_path);
 
 	g_atomic_int_set(&initialized, 0);
 	g_atomic_int_set(&stopping, 0);
@@ -448,12 +491,13 @@ static void *janus_sampleevh_handler(void *data) {
 	JANUS_LOG(LOG_VERB, "Joining SampleEventHandler handler thread\n");
 	json_t *event = NULL, *output = NULL;
 	char *event_text = NULL;
-	char compressed_text[8192];
-	size_t compressed_len = 0;
+	// char compressed_text[8192]; enable if events sent to API
+	// size_t compressed_len = 0; enable if events sent to API
 	int count = 0, max = group_events ? 100 : 1;
 	int retransmit = 0;
 	while(g_atomic_int_get(&initialized) && !g_atomic_int_get(&stopping)) {
 		if(!retransmit) {
+			gboolean event_consumed = FALSE;
 			event = g_async_queue_pop(events);
 			if(event == &exit_event)
 				break;
@@ -461,6 +505,7 @@ static void *janus_sampleevh_handler(void *data) {
 			output = NULL;
 
 			while(TRUE) {
+				event_consumed = FALSE;
 				/* Handle event: just for fun, let's see how long it took for us to take care of this */
 				json_t *created = json_object_get(event, "timestamp");
 				if(created && json_is_integer(created)) {
@@ -608,6 +653,24 @@ static void *janus_sampleevh_handler(void *data) {
 							   }
 							}
 						*/
+						if(media_logfile != NULL){
+							event_text = json_dumps(event, json_format);
+							/* Save it to file */
+							size_t event_len = 0, offset = 0, written = 0;
+							event_len = strlen(event_text);
+							while(event_len > 0) {
+								written = fwrite(event_text + offset, sizeof(char), event_len, media_logfile);
+								event_len -= written;
+								offset += written;
+							}
+							fwrite("\n", sizeof(char), 1, media_logfile);
+							fflush(media_logfile);
+							free(event_text);
+							event_text = NULL;
+							event_consumed = TRUE;
+						}
+						if(event_consumed == TRUE)
+							json_decref(event);
 						break;
 					case JANUS_EVENT_TYPE_PLUGIN:
 						/* This is a plugin related event. Since each plugin may
@@ -689,19 +752,23 @@ static void *janus_sampleevh_handler(void *data) {
 						JANUS_LOG(LOG_WARN, "Unknown type of event '%d'\n", type);
 						break;
 				}
-				if(!group_events) {
-					/* We're done here, we just need a single event */
-					output = event;
-					break;
+				/* if event not already consumed, consider it else skip*/
+				if(event_consumed != TRUE)
+				{
+					if(!group_events) {
+						/* We're done here, we just need a single event */
+						output = event;
+						break;
+					}
+					/* If we got here, we're grouping */
+					if(output == NULL)
+						output = json_array();
+					json_array_append_new(output, event);
+					/* Never group more than a maximum number of events, though, or we might stay here forever */
+					count++;
+					if(count == max)
+						break;
 				}
-				/* If we got here, we're grouping */
-				if(output == NULL)
-					output = json_array();
-				json_array_append_new(output, event);
-				/* Never group more than a maximum number of events, though, or we might stay here forever */
-				count++;
-				if(count == max)
-					break;
 				event = g_async_queue_try_pop(events);
 				if(event == NULL || event == &exit_event)
 					break;
@@ -709,15 +776,31 @@ static void *janus_sampleevh_handler(void *data) {
 
 			/* Since this a simple plugin, it does the same for all events: so just convert to string... */
 			event_text = json_dumps(output, json_format);
-			if(event_text == NULL) {
-				JANUS_LOG(LOG_WARN, "Failed to stringify event, event lost...\n");
-				/* Nothing we can do... get rid of the event */
-				json_decref(output);
-				output = NULL;
-				continue;
+			if(event_text)
+			{
+				if(logfile != NULL){
+					/* Save it to file */
+					size_t event_len = 0, offset = 0, written = 0;
+					event_len = strlen(event_text);
+					while(event_len > 0) {
+						written = fwrite(event_text + offset, sizeof(char), event_len, logfile);
+						event_len -= written;
+						offset += written;
+					}
+					fwrite("\n", sizeof(char), 1, logfile);
+					fflush(logfile);
+				}
+				else
+				{
+					JANUS_LOG(LOG_VERB, "event_text:%s\n",event_text);
+				}
 			}
+			free(event_text);
+			json_decref(output);
+			output = NULL;
 		}
 		/* Whether we just prepared the event or this is a retransmission, send it via HTTP POST */
+#if 0
 		CURLcode res;
 		struct curl_slist *headers = NULL;
 		CURL *curl = curl_easy_init();
@@ -791,6 +874,15 @@ done:
 		/* Done, let's unref the event */
 		json_decref(output);
 		output = NULL;
+#endif
+	}
+	if(logfile != NULL) {
+		fflush(logfile);
+		fclose(logfile);
+	}
+	if(media_logfile != NULL) {
+		fflush(media_logfile);
+		fclose(media_logfile);
 	}
 	JANUS_LOG(LOG_VERB, "Leaving SampleEventHandler handler thread\n");
 	return NULL;

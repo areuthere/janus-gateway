@@ -11,11 +11,11 @@ general: {
 	loggers_folder = "@loggerdir@"			# External loggers folder
 
 		# The next settings configure logging
-	#log_to_stdout = false					# Whether the Janus output should be written
+	log_to_stdout = false					# Whether the Janus output should be written
 											# to stdout or not (default=true)
-	#log_to_file = "/path/to/janus.log"		# Whether to use a log file or not
-	debug_level = 4							# Debug/logging level, valid values are 0-7
-	#debug_timestamps = true				# Whether to show a timestamp for each log line
+	log_to_file = "/opt/janus/logs/janus.log"		# Whether to use a log file or not
+	debug_level = 5							# Debug/logging level, valid values are 0-7
+	debug_timestamps = true				# Whether to show a timestamp for each log line
 	#debug_colors = false					# Whether colors should be disabled in the log
 	#debug_locks = true						# Whether to enable debugging of locks (very verbose!)
 	#log_prefix = "[janus] "				# In case you want log lines to be prefixed by some
@@ -23,6 +23,9 @@ general: {
 											# It supports terminal colors, meaning something like
 											# "[\x1b[32mjanus\x1b[0m] " would show a green "janus"
 											# string in square brackets (assuming debug_colors=true).
+
+	#workapps_token_auth = true			# Enable workapps token authentication, disabled by default
+	#workapps_token_auth_secret = "secret"		# workapps token authentication secret key
 
 		# This is what you configure if you want to launch Janus as a daemon
 	#daemonize = true						# Whether Janus should run as a daemon
@@ -455,8 +458,8 @@ loggers: {
 # events): if you'd rather receive a single containing all media stats in a
 # single array, set 'combine_media_stats' to true.
 events: {
-	#broadcast = true
+	broadcast = true
 	#combine_media_stats = true
 	#disable = "libjanus_sampleevh.so"
-	#stats_period = 5
+	stats_period = 5
 }

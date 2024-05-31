@@ -54,6 +54,8 @@ const char *janus_get_api_error(int error) {
 			return "Wrong WebRTC state";
 		case JANUS_ERROR_NOT_ACCEPTING_SESSIONS:
 			return "Currently not accepting new sessions";
+		case JANUS_ERROR_WORKAPPS_EXPIRED_TOKEN:
+			return "Token has been expired";
 		default:
 			return "Unknown error";
 	}

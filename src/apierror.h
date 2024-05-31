@@ -67,6 +67,9 @@
 /*! \brief The server is currently configured not to accept new sessions */
 #define JANUS_ERROR_NOT_ACCEPTING_SESSIONS		472
 
+/*! \brief The workapps token provided in create session has been expired */
+#define JANUS_ERROR_WORKAPPS_EXPIRED_TOKEN		10001
+
 
 /*! \brief Helper method to get a string representation of an API error code
  * @param[in] error The API error code

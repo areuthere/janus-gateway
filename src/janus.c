@@ -43,6 +43,7 @@
 #include "auth.h"
 #include "record.h"
 #include "events.h"
+#include "workapps_authentcation.h"
 
 
 #define JANUS_NAME				"Janus WebRTC Server"
@@ -984,6 +985,22 @@ static int janus_request_check_secret(janus_request *request, guint64 session_id
 	return 0;
 }
 
+static int janus_request_authenticate_workapps_token(janus_request *request)
+{
+
+	json_t *root = request->message;
+	json_t *workapps_token = json_object_get(root, "workapps_token");
+	json_t *credential = json_object_get(root, "credential");
+	if(janus_workapps_auth_is_enabled() == FALSE)
+		return 0;
+	if (! (workapps_token && json_is_string(workapps_token) && credential && json_is_string(credential)))
+	{
+		return JANUS_ERROR_UNAUTHORIZED;
+	}
+
+	return janus_workapps_token_authenticate(json_string_value(workapps_token), json_string_value(credential));
+}
+
 static void janus_request_ice_handle_answer(janus_ice_handle *handle, char *jsep_sdp) {
 	/* We got our answer */
 	janus_flags_clear(&handle->webrtc_flags, JANUS_ICE_HANDLE_WEBRTC_PROCESSING_OFFER);
@@ -1053,6 +1070,13 @@ int janus_process_incoming_request(janus_request *request) {
 		return ret;
 	}
 	json_t *root = request->message;
+
+	char msg_text_str[4096];
+	char* msg_text = json_dumps(root, JSON_INDENT(3) | JSON_PRESERVE_ORDER);
+	snprintf(msg_text_str, sizeof(msg_text_str), "%s", msg_text);
+	JANUS_LOG(LOG_INFO, "Received Request on Janus from client:\n%s\n",msg_text_str);
+	free(msg_text);
+
 	if(root == NULL) {
 		json_error_t *error = request->error;
 		if(error != NULL) {
@@ -1121,6 +1145,14 @@ int janus_process_incoming_request(janus_request *request) {
 			ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_UNAUTHORIZED, NULL);
 			goto jsondone;
 		}
+
+		/* Authenticate using workapps custom authenticaton method */
+		ret = janus_request_authenticate_workapps_token(request);
+		if(ret != 0) {
+			ret = janus_process_error(request, session_id, transaction_text, ret, NULL);
+			goto jsondone;
+		}
+
 		session_id = 0;
 		json_t *id = json_object_get(root, "id");
 		if(id != NULL) {
@@ -4810,6 +4842,12 @@ gint main(int argc, char *argv[]) {
 		janus_config_add(config, config_general, janus_config_item_create("token_auth", "true"));
 	if(options.token_auth_secret)
 		janus_config_add(config, config_general, janus_config_item_create("token_auth_secret", options.token_auth_secret));
+	if(options.workapps_token_auth) {
+		janus_config_add(config, config_general, janus_config_item_create("workapps_token_auth", "yes"));
+	}
+	if(options.workapps_token_auth_secret) {
+		janus_config_add(config, config_general, janus_config_item_create("workapps_token_auth_secret", options.workapps_token_auth_secret));
+	}
 	if(options.no_webrtc_encryption)
 		janus_config_add(config, config_general, janus_config_item_create("no_webrtc_encryption", "true"));
 	if(options.cert_pem)
@@ -5030,6 +5068,15 @@ gint main(int argc, char *argv[]) {
 	if (item && item->value)
 		auth_secret = item->value;
 	janus_auth_init(auth_enabled, auth_secret);
+
+	/*Check if workapps based token authentication needs to be used */
+	item = janus_config_get(config, config_general, janus_config_type_item, "workapps_token_auth");
+	gboolean workapps_auth_enabled = item && item->value && janus_is_true(item->value);
+	item = janus_config_get(config, config_general, janus_config_type_item, "workapps_token_auth_secret");
+	const char *workapps_auth_secret = NULL;
+	if (item && item->value)
+		workapps_auth_secret = item->value;
+	janus_workapps_auth_init(workapps_auth_enabled, workapps_auth_secret);
 
 	/* Check if opaque IDs should be sent back in the Janus API too */
 	item = janus_config_get(config, config_general, janus_config_type_item, "opaqueid_in_api");
@@ -5993,6 +6040,7 @@ gint main(int argc, char *argv[]) {
 #endif
 	janus_rtp_forwarders_deinit();
 	janus_auth_deinit();
+	janus_workapps_auth_deinit();
 
 	JANUS_LOG(LOG_INFO, "Closing plugins:\n");
 	if(plugins != NULL && g_hash_table_size(plugins) > 0) {

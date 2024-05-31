@@ -1952,10 +1952,14 @@ static gboolean string_ids = FALSE;
 static gboolean ipv6_disabled = FALSE;
 static janus_callbacks *gateway = NULL;
 static GThread *handler_thread;
+static GThread *recordings_validator_thread;
 static void *janus_videoroom_handler(void *data);
+static void *janus_videoroom_recording_status_handler(void* data);
 static void janus_videoroom_relay_rtp_packet(gpointer data, gpointer user_data);
 static void janus_videoroom_relay_data_packet(gpointer data, gpointer user_data);
 static void janus_videoroom_hangup_media_internal(gpointer session_data);
+
+static char* config_rec_dir = NULL;
 
 typedef enum janus_videoroom_p_type {
 	janus_videoroom_p_type_none = 0,
@@ -2054,6 +2058,7 @@ typedef struct janus_videoroom {
 	GList *threads;				/* List of helper threads, if any */
 	janus_mutex mutex;			/* Mutex to lock this room instance */
 	janus_refcount ref;			/* Reference counter for this room */
+	guint64 recording_id;       /* Record the files inside recording Id folder */
 } janus_videoroom;
 static GHashTable *rooms;
 static janus_mutex rooms_mutex = JANUS_MUTEX_INITIALIZER;
@@ -2338,6 +2343,8 @@ static void janus_videoroom_remote_recipient_free(janus_videoroom_remote_recipie
 /* Start / stop recording */
 static void janus_videoroom_recorder_create(janus_videoroom_publisher_stream *ps);
 static void janus_videoroom_recorder_close(janus_videoroom_publisher *participant);
+
+static void janus_videoroom_last_participant(janus_videoroom_publisher *participant);
 
 /* Freeing stuff */
 static void janus_videoroom_subscriber_stream_destroy(janus_videoroom_subscriber_stream *s) {
@@ -2696,6 +2703,9 @@ static void janus_videoroom_reqpli(janus_videoroom_publisher_stream *ps, const c
 #define JANUS_VIDEOROOM_ERROR_INVALID_SDP		437
 #define JANUS_VIDEOROOM_ERROR_INVALID_FEED		438
 
+/*! \brief Previous recording for room is already in progress */
+#define JANUS_ERROR_RECORDING_ALREADY_IN_PROGRESS		20001
+#define JANUS_ERROR_RECORDING_NOT_READY	20002
 
 /* RTP forwarder helpers */
 static janus_rtp_forwarder *janus_videoroom_rtp_forwarder_add_helper(janus_videoroom_publisher *p,
@@ -3387,7 +3397,27 @@ int janus_videoroom_init(janus_callbacks *callback, const char *config_path) {
 	/* This is the callback we'll need to invoke to contact the Janus core */
 	gateway = callback;
 
+	if(config != NULL) {
+		janus_config_category *config_general = janus_config_get_create(config, NULL, janus_config_type_category, "general");
+		janus_config_item *rec_dir = janus_config_get(config, config_general, janus_config_type_item, "rec_dir");
+		if(rec_dir && rec_dir->value) {
+			config_rec_dir = g_malloc0(256);
+			g_snprintf(config_rec_dir, 255, "%s",rec_dir->value);
+		}
+		janus_config_item *rec_status_frequency = janus_config_get(config, config_general, janus_config_type_item, "recording_status_frequency");
+		if(rec_status_frequency != NULL)
+		{
+			if(atoi(rec_status_frequency->value) > 0)
+				recording_status_frequency = atoi(rec_status_frequency->value);
+			else
+				recording_status_frequency = 0;
+		}
+	}
+
 	/* Parse configuration to populate the rooms list */
+	/*PG - Disable default configuration path to enable custom one*/
+	config = NULL;
+
 	if(config != NULL) {
 		janus_config_category *config_general = janus_config_get_create(config, NULL, janus_config_type_category, "general");
 		/* Any admin key to limit who can "create"? */
@@ -3648,7 +3678,8 @@ int janus_videoroom_init(janus_callbacks *callback, const char *config_path) {
 				videoroom->record = janus_is_true(record->value);
 			}
 			if(rec_dir && rec_dir->value) {
-				videoroom->rec_dir = g_strdup(rec_dir->value);
+				videoroom->rec_dir = g_malloc0(256);
+				g_snprintf(videoroom->rec_dir, 255, "%s/%"SCNu64"/",rec_dir->value,videoroom->room_id);
 			}
 			if(lock_record && lock_record->value) {
 				videoroom->lock_record = janus_is_true(lock_record->value);
@@ -3814,6 +3845,17 @@ int janus_videoroom_init(janus_callbacks *callback, const char *config_path) {
 		janus_config_destroy(config);
 		return -1;
 	}
+
+	recordings_validator_thread =  g_thread_try_new("recording validation handler", janus_videoroom_recording_status_handler, NULL, &error);
+	if(error != NULL) {
+		g_atomic_int_set(&initialized, 0);
+		JANUS_LOG(LOG_ERR, "Got error %d (%s) trying to launch the recording status handler thread...\n",
+			error->code, error->message ? error->message : "??");
+		g_error_free(error);
+		janus_config_destroy(config);
+		return -1;
+	}
+
 	JANUS_LOG(LOG_INFO, "%s initialized!\n", JANUS_VIDEOROOM_NAME);
 	return 0;
 }
@@ -3827,6 +3869,11 @@ void janus_videoroom_destroy(void) {
 	if(handler_thread != NULL) {
 		g_thread_join(handler_thread);
 		handler_thread = NULL;
+	}
+
+	if(recordings_validator_thread != NULL) {
+		g_thread_join(recordings_validator_thread);
+		recordings_validator_thread = NULL;
 	}
 
 	/* FIXME We should destroy the sessions cleanly */
@@ -4395,6 +4442,12 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 	json_t *request = json_object_get(message, "request");
 	const char *request_text = json_string_value(request);
 
+	char msg_text_str[4096];
+	char* msg_text = json_dumps(message, JSON_INDENT(3) | JSON_PRESERVE_ORDER);
+	snprintf(msg_text_str, sizeof(msg_text_str), "%s", msg_text);
+	JANUS_LOG(LOG_VERB, "Received Request on videoroom plugin:%s\n",msg_text_str);
+	free(msg_text);
+
 	/* Parse the message */
 	int error_code = 0;
 	char error_cause[512];
@@ -4616,7 +4669,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		if(publishers)
 			videoroom->max_publishers = json_integer_value(publishers);
 		if(videoroom->max_publishers < 0)
-			videoroom->max_publishers = 3;	/* FIXME How should we choose a default? */
+			videoroom->max_publishers = 6;	/* FIXME How should we choose a default? */
 		videoroom->bitrate = 0;
 		if(bitrate)
 			videoroom->bitrate = json_integer_value(bitrate);
@@ -4770,9 +4823,40 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		videoroom->notify_joining = notify_joining ? json_is_true(notify_joining) : FALSE;
 		if(record) {
 			videoroom->record = json_is_true(record);
+			if(videoroom->record){
+				json_t *recordingid = json_object_get(root, "recordingId");
+				guint64 recordingId = 0;
+				if (recordingid){
+					recordingId = json_integer_value(recordingid);
+					if(recordingId==0){
+						JANUS_LOG(LOG_ERR, "Recording id cannot be 0\n");
+						error_code = JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT;
+						g_snprintf(error_cause, 512, "Recording id cannot be 0");
+						videoroom->record = FALSE;
+						janus_mutex_unlock(&rooms_mutex);
+						goto prepare_response;
+					}
+					videoroom->recording_id = recordingId;
+					JANUS_LOG(LOG_VERB, "Room Recording Id: %" SCNu64 "\n", recordingId);
+				}
+				else{
+					error_code = JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT;
+					JANUS_LOG(LOG_VERB, "Room Recording Id is missing");
+					videoroom->record = FALSE;
+					janus_mutex_unlock(&rooms_mutex);
+					goto prepare_response;
+				}
+				JANUS_LOG(LOG_VERB, "Enable Recording : %d \n", (videoroom->record ? 1 : 0));
+			}
 		}
 		if(rec_dir) {
 			videoroom->rec_dir = g_strdup(json_string_value(rec_dir));
+			videoroom->rec_dir = g_malloc0(256);
+			g_snprintf(videoroom->rec_dir, 255, "%s/VideoRecording_",json_string_value(rec_dir)); // just have the the VideoRecording_ Later we will add recording Id when we receive.
+		}
+		else{
+			videoroom->rec_dir = g_malloc0(256);
+			g_snprintf(videoroom->rec_dir, 255, "%s/VideoRecording_",config_rec_dir); // just have the the VideoRecording_ Later we will add recording Id when we receive.
 		}
 		if(lock_record) {
 			videoroom->lock_record = json_is_true(lock_record);
@@ -6685,6 +6769,29 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 			goto prepare_response;
 		json_t *record = json_object_get(root, "record");
 		gboolean recording_active = json_is_true(record);
+		json_t *recordingid = json_object_get(root, "recordingId");
+		guint64 recordingId = 0;
+		if(recording_active == TRUE)
+		{
+			if (recordingid)
+			{
+				recordingId = json_integer_value(recordingid);
+				if(recordingId==0)
+				{
+					JANUS_LOG(LOG_ERR, "Recording id cannot be 0\n");
+					error_code = JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT;
+					g_snprintf(error_cause, 512, "Recording id cannot be 0");
+					goto prepare_response;
+				}
+				JANUS_LOG(LOG_VERB, "Room Recording Id: %" SCNu64 "\n", recordingId);
+			}
+			else
+			{
+				error_code = JANUS_VIDEOROOM_ERROR_INVALID_ELEMENT;
+				JANUS_LOG(LOG_VERB, "Room Recording Id is missing");
+				goto prepare_response;
+			}
+		}
 		JANUS_LOG(LOG_VERB, "Enable Recording: %d\n", (recording_active ? 1 : 0));
 		/* Lookup room */
 		janus_mutex_lock(&rooms_mutex);
@@ -6697,6 +6804,7 @@ static json_t *janus_videoroom_process_synchronous_request(janus_videoroom_sessi
 		janus_refcount_increase(&videoroom->ref);
 		janus_mutex_unlock(&rooms_mutex);
 		janus_mutex_lock(&videoroom->mutex);
+
 		/* Set recording status */
 		gboolean room_new_recording_active = recording_active;
 		if (room_new_recording_active != videoroom->record) {

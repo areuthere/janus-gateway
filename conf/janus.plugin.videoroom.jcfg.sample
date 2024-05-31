@@ -61,12 +61,17 @@ general: {
 									# if this key is provided in the request
 	#lock_rtp_forward = true		# Whether the admin_key above should be
 									# enforced for RTP forwarding requests too
-	#events = false					# Whether events should be sent to event
+	events = true					# Whether events should be sent to event
 									# handlers (default=true)
 
 	# By default, integers are used as a unique ID for both rooms and participants.
 	# In case you want to use strings instead (e.g., a UUID), set string_ids to true.
 	#string_ids = true
+
+	#how frequently to send recording status to participants of room
+	#To disable set it to 0
+	recording_status_frequency = 10
+	rec_dir = "/opt/efs-janus-app/VideoRecDownloads"
 }
 
 room-1234: {
