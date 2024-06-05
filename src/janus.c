@@ -664,6 +664,12 @@ static void janus_session_free(const janus_refcount *session_ref) {
 		janus_request_destroy(session->source);
 		session->source = NULL;
 	}
+
+	/* removes the entry form sessionid-userid map as well */
+	janus_mutex_lock(&sessionid_userid_map_mutex);
+	g_hash_table_remove(sessionid_userid_map, &session->session_id);
+	janus_mutex_unlock(&sessionid_userid_map_mutex);
+
 	g_free(session);
 }
 
@@ -1178,6 +1184,20 @@ int janus_process_incoming_request(janus_request *request) {
 		session->source = janus_request_new(request->transport, request->instance, NULL, FALSE, NULL, NULL);
 		/* Notify the source that a new session has been created */
 		request->transport->session_created(request->instance, session->session_id);
+
+		/* Create sessionid - userid mapping, to be used for events */
+		// TODO mayank, check if the below if condition is required
+		json_t *workapps_token = json_object_get(request->message, "workapps_token");
+		if(workapps_token)
+		{
+			 const char* token = json_string_value(workapps_token);
+			 const char* user_id = strchr(token,':');
+			janus_mutex_lock(&sessionid_userid_map_mutex);
+			if((user_id !=NULL) && (user_id+1 != NULL))
+				g_hash_table_insert(sessionid_userid_map,janus_uint64_dup(session->session_id),g_strdup(user_id+1));
+			janus_mutex_unlock(&sessionid_userid_map_mutex);
+		}
+
 		/* Notify event handlers */
 		if(janus_events_is_enabled()) {
 			/* Session created, add info on the transport that originated it */
@@ -1429,6 +1449,46 @@ int janus_process_incoming_request(janus_request *request) {
 		char *jsep_type = NULL;
 		char *jsep_sdp = NULL, *jsep_sdp_stripped = NULL;
 		gboolean renegotiation = FALSE;
+
+		if(!strcasecmp(plugin_t->get_name(),"JANUS VideoRoom plugin") && body)
+		{
+			json_t* request = json_object_get(body, "request");
+			if(request)
+			{
+				const char* request_str = json_string_value(request);
+				if(!strcasecmp(request_str, "create") || !strcasecmp(request_str, "join"))
+				{
+					janus_mutex_lock(&handleid_roomid_map_mutex);
+					if(handle && handle_id>0)
+					{
+						json_t *room = NULL;
+						room =  json_object_get(body, "room");
+						if(room)
+						{
+							guint64 room_id = json_integer_value(room);
+							if(room_id>0)
+								g_hash_table_insert(handleid_roomid_map,janus_uint64_dup(handle_id),janus_uint64_dup(room_id));
+						}
+					}
+					janus_mutex_unlock(&handleid_roomid_map_mutex);
+
+					janus_mutex_lock(&handleid_id_map_mutex);
+					if(handle && handle_id>0)
+					{
+						json_t *id = NULL;
+						id =  json_object_get(body, "id");
+						if(id)
+						{
+							guint64 participant_id = json_integer_value(id);
+							if(participant_id>0)
+								g_hash_table_insert(handleid_id_map,janus_uint64_dup(handle_id),janus_uint64_dup(participant_id));
+						}
+					}
+					janus_mutex_unlock(&handleid_id_map_mutex);
+				}
+			}
+		}
+
 		if(jsep != NULL) {
 			if(!json_is_object(jsep)) {
 				ret = janus_process_error(request, session_id, transaction_text, JANUS_ERROR_INVALID_JSON_OBJECT, "Invalid jsep object");
@@ -4390,6 +4450,9 @@ void janus_plugin_notify_event(janus_plugin *plugin, janus_plugin_session *plugi
 	guint64 session_id = 0, handle_id = 0;
 	char *opaque_id = NULL;
 	if(plugin_session != NULL) {
+//TODO Mayank - Need to see if we can removing this check as it cause lot of events after the session is destroyed to not appear
+//Since we have pointer null check everywhere it should not call issues except of receiving events
+//even though the session is gone.
 		if(!janus_plugin_session_is_alive(plugin_session)) {
 			json_decref(event);
 			return;
@@ -4842,12 +4905,10 @@ gint main(int argc, char *argv[]) {
 		janus_config_add(config, config_general, janus_config_item_create("token_auth", "true"));
 	if(options.token_auth_secret)
 		janus_config_add(config, config_general, janus_config_item_create("token_auth_secret", options.token_auth_secret));
-	if(options.workapps_token_auth) {
+	if(options.workapps_token_auth)
 		janus_config_add(config, config_general, janus_config_item_create("workapps_token_auth", "yes"));
-	}
-	if(options.workapps_token_auth_secret) {
+	if(options.workapps_token_auth_secret)
 		janus_config_add(config, config_general, janus_config_item_create("workapps_token_auth_secret", options.workapps_token_auth_secret));
-	}
 	if(options.no_webrtc_encryption)
 		janus_config_add(config, config_general, janus_config_item_create("no_webrtc_encryption", "true"));
 	if(options.cert_pem)
@@ -5488,6 +5549,19 @@ gint main(int argc, char *argv[]) {
 	/* Sessions */
 	sessions = g_hash_table_new_full(g_int64_hash, g_int64_equal, (GDestroyNotify)g_free, NULL);
 	janus_mutex_init(&sessions_mutex);
+
+	/*sessionid userid map*/
+	sessionid_userid_map = g_hash_table_new_full(g_int64_hash, g_int64_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
+	janus_mutex_init(&sessionid_userid_map);
+
+	/*handleid roomid map*/
+	handleid_roomid_map = g_hash_table_new_full(g_int64_hash, g_int64_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
+	janus_mutex_init(&handleid_roomid_map_mutex);
+
+	/*handleid id map*/
+	handleid_id_map = g_hash_table_new_full(g_int64_hash, g_int64_equal, (GDestroyNotify)g_free, (GDestroyNotify)g_free);
+	janus_mutex_init(&handleid_id_map_mutex);
+
 	/* Start the sessions timeout watchdog */
 	sessions_watchdog_context = g_main_context_new();
 	GMainLoop *watchdog_loop = g_main_loop_new(sessions_watchdog_context, FALSE);

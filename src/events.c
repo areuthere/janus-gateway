@@ -40,6 +40,19 @@ static GHashTable *eventhandlers = NULL;
 static GAsyncQueue *events = NULL;
 static json_t exit_event;
 
+/*map of sessionid and userid*/
+janus_mutex sessionid_userid_map_mutex;
+GHashTable *sessionid_userid_map = NULL;
+
+
+/*map of handleid and roomid */
+janus_mutex handleid_roomid_map_mutex;
+GHashTable *handleid_roomid_map = NULL;
+
+/*map of handleid and id */
+janus_mutex handleid_id_map_mutex;
+GHashTable *handleid_id_map = NULL;
+
 static GThread *events_thread;
 void *janus_events_thread(void *data);
 
@@ -144,6 +157,12 @@ void janus_events_notify_handlers(int type, int subtype, guint64 session_id, ...
 			/* ... but plugin/transport events may not have one either */
 		} else {
 			json_object_set_new(event, "session_id", json_integer(session_id));
+
+			janus_mutex_lock(&sessionid_userid_map_mutex);
+			char* user_id = g_hash_table_lookup(sessionid_userid_map, &session_id);
+			janus_mutex_unlock(&sessionid_userid_map_mutex);
+			if(user_id)
+				json_object_set_new(event, "user_id", json_string(user_id));
 		}
 	}
 	json_t *body = NULL;
@@ -263,6 +282,22 @@ void janus_events_notify_handlers(int type, int subtype, guint64 session_id, ...
 			va_end(args);
 			return;
 	}
+
+	if(handle_id > 0)
+	{
+		janus_mutex_lock(&handleid_roomid_map_mutex);
+		gconstpointer room_id = g_hash_table_lookup(handleid_roomid_map, &handle_id);
+		janus_mutex_unlock(&handleid_roomid_map_mutex);
+		if(room_id && *(gint64*)room_id>0)
+			json_object_set_new(event, "room", json_integer(*(gint64*)room_id));
+
+		janus_mutex_lock(&handleid_id_map_mutex);
+		gconstpointer id = g_hash_table_lookup(handleid_id_map, &handle_id);
+		janus_mutex_unlock(&handleid_id_map_mutex);
+		if(id && *(gint64*)id>0)
+			json_object_set_new(event, "id", json_integer(*(gint64*)id));
+	}
+
 	json_object_set_new(event, "event", body);
 	va_end(args);
 

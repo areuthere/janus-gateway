@@ -15,6 +15,19 @@
 
 #include "debug.h"
 #include "events/eventhandler.h"
+#include "mutex.h"
+
+/*map of sessionid and userid*/
+extern janus_mutex sessionid_userid_map_mutex;
+extern GHashTable *sessionid_userid_map;
+
+/*map of handleid and roomid */
+extern janus_mutex handleid_roomid_map_mutex;
+extern GHashTable *handleid_roomid_map;
+
+/*map of handleid and id */
+extern janus_mutex handleid_id_map_mutex;
+extern GHashTable *handleid_id_map;
 
 /*! \brief Initialize the event handlers broadcaster
  * @param[in] enabled Whether broadcasting events should be supported at all

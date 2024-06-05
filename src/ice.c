@@ -1557,6 +1557,17 @@ gint janus_ice_handle_destroy(void *core_session, janus_ice_handle *handle) {
 		JANUS_LOG(LOG_VERB, "[%"SCNu64"] Manually removed handle from loop #%d\n", handle->handle_id, loop->id);
 	}
 	janus_mutex_unlock(&event_loops_mutex);
+
+	/* removes the entry from handleid_roomid_map map as well */
+	janus_mutex_lock(&handleid_roomid_map_mutex);
+	g_hash_table_remove(handleid_roomid_map, &handle->handle_id);
+	janus_mutex_unlock(&handleid_roomid_map_mutex);
+
+	/* removes the entry from handleid_id_map map as well */
+	janus_mutex_lock(&handleid_id_map_mutex);
+	g_hash_table_remove(handleid_id_map, &handle->handle_id);
+	janus_mutex_unlock(&handleid_id_map_mutex);
+
 	janus_plugin *plugin_t = (janus_plugin *)handle->app;
 	if(plugin_t == NULL) {
 		/* There was no plugin attached, probably something went wrong there */
